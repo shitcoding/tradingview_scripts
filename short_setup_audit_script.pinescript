@@ -1,0 +1,225 @@
+//@version=6
+indicator("Hedge Short Setup Outcome Auditor v1.1", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs (mirrored from your signal script so conditions match 1:1)
+// ─────────────────────────────────────────────────────────────────────────────
+grpSurge   = "1) Surge (Momentum Exhaustion)"
+useSurge   = input.bool(true,  title="Use % Surge condition", group=grpSurge)
+surgeLb    = input.int(72,     title="Lookback bars (e.g., 72 bars ≈ 3d on 1h)", minval=1, group=grpSurge)
+surgePct   = input.float(10.0, title="Price ↑ over lookback ≥ (%)", minval=0.1, step=0.1, group=grpSurge)
+
+grpRSI     = "2) RSI Overbought"
+useRSI     = input.bool(true,  title="Use RSI overbought & roll-over", group=grpRSI)
+rsiLen     = input.int(14,     title="RSI Length", minval=2, group=grpRSI)
+rsiOb      = input.int(70,     title="RSI Overbought Level", minval=50, maxval=100, group=grpRSI)
+needRoll   = input.bool(true,  title="Require RSI rolling over (RSI < RSI[1])", group=grpRSI)
+
+grpBB      = "3) Bollinger Exhaustion"
+useBB      = input.bool(true,  title="Use Bollinger exhaustion filter", group=grpBB)
+bbLen      = input.int(20,     title="BB Length", minval=2, group=grpBB)
+bbMult     = input.float(2.0,  title="BB StdDev Mult", minval=0.5, step=0.1, group=grpBB)
+bbMode     = input.string("Touch+Re-entry", "Exhaustion Logic", options=["Above Upper","Touch+Re-entry"], group=grpBB)
+
+grpVol     = "4) Volume Confirmation (optional)"
+useVol     = input.bool(false, title="Require volume spike", group=grpVol)
+volLen     = input.int(20,     title="Volume SMA Length", minval=1, group=grpVol)
+volMult    = input.float(1.5,  title="Volume ≥ SMA ×", minval=0.1, step=0.1, group=grpVol)
+
+grpTrend   = "Trend Filter (optional)"
+trendMode  = input.string("Off", "Trend Filter", options=["Off","Avoid Strong Uptrend","Only In Uptrend"], group=grpTrend)
+emaLen     = input.int(200,    title="EMA length for trend", minval=2, group=grpTrend)
+
+grpSig     = "Signal & Alerts (mirrors your firing semantics)"
+minConf    = input.int(2,      title="Min confluence for BASE (1..4)", minval=1, maxval=4, group=grpSig)
+strongConf = input.int(3,      title="Min confluence for STRONG (2..4)", minval=2, maxval=4, group=grpSig)
+fireOnClose= input.bool(true,  title="Fire signals on bar close only", group=grpSig)
+oneShot    = input.bool(true,  title="Only first bar of a cluster (avoid repeated alerts)", group=grpSig)
+
+grpATR     = "TP definition (exactly like your hints)"
+atrLen     = input.int(14,     title="ATR Length", minval=1, group=grpATR)
+atrSLx     = input.float(1.5,  title="Suggested SL = ATR × (unused, for display)", minval=0.1, step=0.1, group=grpATR)
+atrTPx     = input.float(1.0,  title="TP = ATR ×", minval=0.1, step=0.1, group=grpATR)
+
+grpFmt     = "Formatting"
+tzOffsetH  = input.int(3,      title="Datetime offset from UTC (hours)", minval=-12, maxval=14, group=grpFmt)  // default UTC+3
+showTable  = input.bool(true,  title="Show summary table (hit rates)", group=grpFmt)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core calcs
+// ─────────────────────────────────────────────────────────────────────────────
+ema      = ta.ema(close, emaLen)
+emaSlope = ema - ema[5]
+strongUp = close > ema and emaSlope > 0
+trendOK  = switch trendMode
+    "Off"                  => true
+    "Avoid Strong Uptrend" => not strongUp
+    =>                        strongUp
+
+nzCloseN = nz(close[surgeLb])
+surgeOk  = useSurge and (nzCloseN > 0) and (close / nzCloseN - 1 >= surgePct/100.0)
+
+rsi      = ta.rsi(close, rsiLen)
+rsiValid = not na(rsi) and not na(rsi[1])
+rsiObOk  = useRSI and rsiValid and (rsi > rsiOb) and (not needRoll or rsi < rsi[1])
+
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+upper = basis + dev
+bbAboveRaw   = close > upper
+bbReenterRaw = ta.crossunder(close, upper)
+bbOk         = useBB and (bbMode == "Above Upper" ? bbAboveRaw : bbReenterRaw)
+
+volSma = ta.sma(volume, volLen)
+volOk  = useVol and (volume > volSma * volMult)
+
+// Confluence & signals
+conf = (surgeOk ? 1 : 0) + (rsiObOk ? 1 : 0) + (bbOk ? 1 : 0) + (volOk ? 1 : 0)
+baseRaw   = trendOK and (conf >= minConf)
+strongRaw = trendOK and (conf >= strongConf)
+
+edgeUp(cond) =>
+    ta.crossover(cond ? 1 : 0, 0.5)
+
+barReady   = fireOnClose ? barstate.isconfirmed : true
+edgeBase   = edgeUp(baseRaw)
+edgeStrong = edgeUp(strongRaw)
+
+baseSig   = barReady and (oneShot ? edgeBase   : baseRaw) and not strongRaw
+strongSig = barReady and (oneShot ? edgeStrong : strongRaw)
+
+// TP from ATR at signal bar
+atr = ta.atr(atrLen)
+sl  = close + atrSLx * atr
+tp  = close - atrTPx * atr
+
+// Datetime string (UTC + offset)
+pad2(x) =>
+    x < 10 ? "0" + str.tostring(x) : str.tostring(x)
+offsetMs = tzOffsetH * 60 * 60 * 1000
+tAdj     = time + offsetMs
+yy2      = (year(tAdj) % 100)
+dtStr    = pad2(dayofmonth(tAdj)) + "." + pad2(month(tAdj)) + "." + pad2(yy2) + " " + pad2(hour(tAdj)) + ":" + pad2(minute(tAdj))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Outcome tracking
+// ─────────────────────────────────────────────────────────────────────────────
+var idxArr        = array.new_int()
+var yArr          = array.new_float()
+var tpArr         = array.new_float()
+var entryArr      = array.new_float()
+var strongArr     = array.new_bool()
+var rsiArr        = array.new_float()
+var confArr       = array.new_int()
+var dtArr         = array.new_string()
+var timeArr       = array.new_int()
+
+// Stats
+var total       = 0
+var totalStrong = 0
+var hit         = 0
+var hitStrong   = 0
+var sumBarsToTP = 0.0
+
+// Store signals
+newSig = strongSig or baseSig
+if newSig
+    array.push(idxArr, bar_index)
+    array.push(yArr,   high)
+    array.push(tpArr,  tp)
+    array.push(entryArr, close)
+    array.push(strongArr, strongSig)
+    array.push(rsiArr, rsi)
+    array.push(confArr, conf)
+    array.push(dtArr,  dtStr)
+    array.push(timeArr, time)   // store bar time for safe labeling
+    total       += 1
+    totalStrong += strongSig ? 1 : 0
+
+// Scan open signals each bar for TP hits
+sz = array.size(idxArr)
+if sz > 0
+    for i = sz - 1 to 0
+        tgt = array.get(tpArr, i)
+        if low <= tgt
+            eIdx    = array.get(idxArr, i)
+            eY      = array.get(yArr, i)
+            eEntry  = array.get(entryArr, i)
+            eStrong = array.get(strongArr, i)
+            eRSI    = array.get(rsiArr, i)
+            eConf   = array.get(confArr, i)
+            eDT     = array.get(dtArr, i)
+            eTime   = array.get(timeArr, i)
+            barsTo  = bar_index - eIdx
+
+            txt = "Short " + syminfo.ticker + " " + (eStrong ? "(STRONG)" : "(BASE)") + "\n" +
+                  eDT + "\n" +
+                  "CFL: " + str.tostring(eConf) + "/4\n" +
+                  "RSI: " + str.tostring(math.round(eRSI, 1)) + "\n" +
+                  "Price: " + str.tostring(eEntry, format.mintick) + "\n" +
+                  "TP: " + str.tostring(tgt, format.mintick) + "\n" +
+                  "RESULT: TP HIT ✓ in " + str.tostring(barsTo) + " bars"
+
+            label.new(x=eTime, y=eY, text=txt, style=label.style_label_down,
+                      xloc=xloc.bar_time, color=color.new(color.lime, 0),
+                      textcolor=color.black, size=size.normal)
+
+            hit       += 1
+            hitStrong += eStrong ? 1 : 0
+            sumBarsToTP += barsTo
+
+            array.remove(idxArr, i)
+            array.remove(yArr, i)
+            array.remove(tpArr, i)
+            array.remove(entryArr, i)
+            array.remove(strongArr, i)
+            array.remove(rsiArr, i)
+            array.remove(confArr, i)
+            array.remove(dtArr, i)
+            array.remove(timeArr, i)
+
+// Mark OPEN at chart end
+if barstate.islastconfirmedhistory
+    openSz = array.size(idxArr)
+    if openSz > 0
+        for i = 0 to openSz - 1
+            eIdx    = array.get(idxArr, i)
+            eY      = array.get(yArr, i)
+            eEntry  = array.get(entryArr, i)
+            eStrong = array.get(strongArr, i)
+            eRSI    = array.get(rsiArr, i)
+            eConf   = array.get(confArr, i)
+            eDT     = array.get(dtArr, i)
+            eTime   = array.get(timeArr, i)
+            tgt     = array.get(tpArr, i)
+            txtOpen = "Short " + syminfo.ticker + " " + (eStrong ? "(STRONG)" : "(BASE)") + "\n" +
+                      eDT + "\n" +
+                      "CFL: " + str.tostring(eConf) + "/4\n" +
+                      "RSI: " + str.tostring(math.round(eRSI, 1)) + "\n" +
+                      "Price: " + str.tostring(eEntry, format.mintick) + "\n" +
+                      "TP: " + str.tostring(tgt, format.mintick) + "\n" +
+                      "RESULT: OPEN ⏳ (no TP yet)"
+            label.new(x=eTime, y=eY, text=txtOpen, style=label.style_label_down,
+                      xloc=xloc.bar_time, color=color.new(color.gray, 10),
+                      textcolor=color.white, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Summary table
+// ─────────────────────────────────────────────────────────────────────────────
+var table statsTbl = na
+if barstate.isfirst
+    statsTbl := table.new(position.top_left, 2, 5, border_width=1)
+
+if showTable and barstate.islastconfirmedhistory
+    avgBars = hit > 0 ? (sumBarsToTP / hit) : na
+    table.cell(statsTbl, 0, 0, "Signals (all)")
+    table.cell(statsTbl, 1, 0, str.tostring(total))
+    table.cell(statsTbl, 0, 1, "TP hits")
+    table.cell(statsTbl, 1, 1, str.tostring(hit))
+    table.cell(statsTbl, 0, 2, "Hit rate")
+    table.cell(statsTbl, 1, 2, total > 0 ? str.tostring(100.0 * hit / total, "#.0") + "%" : "n/a")
+    table.cell(statsTbl, 0, 3, "Avg bars to TP")
+    table.cell(statsTbl, 1, 3, na(avgBars) ? "n/a" : str.tostring(avgBars, "#.0"))
+    table.cell(statsTbl, 0, 4, "STRONG hit rate")
+    strongRate = (totalStrong > 0) ? (100.0 * hitStrong / totalStrong) : na
+    table.cell(statsTbl, 1, 4, na(strongRate) ? "n/a" : str.tostring(strongRate, "#.0") + "%")
