@@ -1,0 +1,163 @@
+//@version=6
+indicator("Hedge Short Setup Finder (Short Entry Monitor) v2.3", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+grpSurge   = "1) Surge (Momentum Exhaustion)"
+useSurge   = input.bool(true,  title="Use % Surge condition", group=grpSurge)
+surgeLb    = input.int(72,     title="Lookback bars (e.g., 72 bars ≈ 3d on 1h)", minval=1, group=grpSurge)
+surgePct   = input.float(10.0, title="Price ↑ over lookback ≥ (%)", minval=0.1, step=0.1, group=grpSurge)
+
+grpRSI     = "2) RSI Overbought"
+useRSI     = input.bool(true,  title="Use RSI overbought & roll-over", group=grpRSI)
+rsiLen     = input.int(14,     title="RSI Length", minval=2, group=grpRSI)
+rsiOb      = input.int(70,     title="RSI Overbought Level", minval=50, maxval=100, group=grpRSI)
+needRoll   = input.bool(true,  title="Require RSI rolling over (RSI < RSI[1])", group=grpRSI)
+
+grpBB      = "3) Bollinger Exhaustion"
+useBB      = input.bool(true,  title="Use Bollinger exhaustion filter", group=grpBB)
+bbLen      = input.int(20,     title="BB Length", minval=2, group=grpBB)
+bbMult     = input.float(2.0,  title="BB StdDev Mult", minval=0.5, step=0.1, group=grpBB)
+bbMode     = input.string("Touch+Re-entry", "Exhaustion Logic", options=["Above Upper","Touch+Re-entry"], group=grpBB)
+
+grpVol     = "4) Volume Confirmation (optional)"
+useVol     = input.bool(false, title="Require volume spike", group=grpVol)
+volLen     = input.int(20,     title="Volume SMA Length", minval=1, group=grpVol)
+volMult    = input.float(1.5,  title="Volume ≥ SMA ×", minval=0.1, step=0.1, group=grpVol)
+
+grpTrend   = "Trend Filter (optional)"
+trendMode  = input.string("Off", "Trend Filter",
+               options=["Off","Avoid Strong Uptrend","Only In Uptrend"], group=grpTrend)
+emaLen     = input.int(200,    title="EMA length for trend", minval=2, group=grpTrend)
+
+grpSig     = "Signal & Alerts"
+minConf    = input.int(2,      title="Min confluence for BASE signal (1..4)", minval=1, maxval=4, group=grpSig)
+strongConf = input.int(3,      title="Min confluence for STRONG signal (2..4)", minval=2, maxval=4, group=grpSig)
+fireOnClose= input.bool(true,  title="Fire signals on bar close only", group=grpSig)
+oneShot    = input.bool(true,  title="Only first bar of a cluster (avoid repeated alerts)", group=grpSig)
+useAnyAlert= input.bool(true,  title="Also trigger alert() (use 'Any alert() function call')", group=grpSig)
+
+grpATR     = "On-chart Hints (suggested SL/TP)"
+showHints  = input.bool(true,  title="Show labels with suggested SL/TP", group=grpATR)
+atrLen     = input.int(14,     title="ATR Length", minval=1, group=grpATR)
+atrSLx     = input.float(1.5,  title="Suggested SL = ATR ×", minval=0.1, step=0.1, group=grpATR)
+atrTPx     = input.float(1.0,  title="Suggested TP = ATR ×", minval=0.1, step=0.1, group=grpATR)
+
+grpFmt     = "Alert Formatting"
+tzOffsetH  = input.int(3,      title="Datetime offset from UTC (hours)", minval=-12, maxval=14, group=grpFmt)  // default UTC+3
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core calculations
+// ─────────────────────────────────────────────────────────────────────────────
+ema      = ta.ema(close, emaLen)
+emaSlope = ema - ema[5]
+strongUp = close > ema and emaSlope > 0
+trendOK  = switch trendMode
+    "Off"                  => true
+    "Avoid Strong Uptrend" => not strongUp
+    =>                        strongUp
+
+nzCloseN = nz(close[surgeLb])
+surgeOk  = useSurge and (nzCloseN > 0) and (close / nzCloseN - 1 >= surgePct/100.0)
+
+rsi      = ta.rsi(close, rsiLen)
+rsiValid = not na(rsi) and not na(rsi[1])
+rsiObOk  = useRSI and rsiValid and (rsi > rsiOb) and (not needRoll or rsi < rsi[1])
+
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+upper = basis + dev
+bbAboveRaw   = close > upper
+bbReenterRaw = ta.crossunder(close, upper)
+bbOk         = useBB and (bbMode == "Above Upper" ? bbAboveRaw : bbReenterRaw)
+
+volSma = ta.sma(volume, volLen)
+volOk  = useVol and (volume > volSma * volMult)
+
+// Confluence (0..4)
+conf = (surgeOk ? 1 : 0) + (rsiObOk ? 1 : 0) + (bbOk ? 1 : 0) + (volOk ? 1 : 0)
+
+// Signals
+baseRaw   = trendOK and (conf >= minConf)
+strongRaw = trendOK and (conf >= strongConf)
+
+// Edge detector without nz() on bools
+edgeUp(cond) =>
+    ta.crossover(cond ? 1 : 0, 0.5)
+
+barReady   = fireOnClose ? barstate.isconfirmed : true
+edgeBase   = edgeUp(baseRaw)
+edgeStrong = edgeUp(strongRaw)
+
+baseSig   = barReady and (oneShot ? edgeBase   : baseRaw)
+strongSig = barReady and (oneShot ? edgeStrong : strongRaw)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: formatted datetime (UTC+offset) & 2-digit padding
+// ─────────────────────────────────────────────────────────────────────────────
+pad2(x) =>
+    x < 10 ? "0" + str.tostring(x) : str.tostring(x)
+
+offsetMs = tzOffsetH * 60 * 60 * 1000
+tAdj     = time + offsetMs
+yy2      = (year(tAdj) % 100)
+dtStr    = pad2(dayofmonth(tAdj)) + "." + pad2(month(tAdj)) + "." + pad2(yy2) + " " + pad2(hour(tAdj)) + ":" + pad2(minute(tAdj))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots & labels (unchanged visuals; label includes the compact SL/TP line)
+// ─────────────────────────────────────────────────────────────────────────────
+plot(ema, title="EMA", color=#888888)
+
+plotshape(baseSig and not strongSig, title="Short Setup (BASE)",
+     style=shape.triangledown, size=size.tiny, color=color.orange, location=location.abovebar,
+     text="SHORT\nBASE")
+
+plotshape(strongSig, title="Short Setup (STRONG)",
+     style=shape.triangledown, size=size.small, color=color.red, location=location.abovebar,
+     text="SHORT\nSTRONG")
+
+atr = ta.atr(atrLen)
+sl  = close + atrSLx * atr
+tp  = close - atrTPx * atr
+
+if showHints and (baseSig or strongSig)
+    txt = "Short " + syminfo.ticker + " " + (strongSig ? "(STRONG)" : "(BASE)") + "\n" +
+          dtStr + "\n" +
+          "CFL: " + str.tostring(conf) + "/4\n" +
+          "RSI: " + str.tostring(math.round(rsi, 1)) + "\n" +
+          "Price: " + str.tostring(close, format.mintick) + "\n" +
+          "SL: " + str.tostring(sl, format.mintick) + "\n" +
+          "TP: " + str.tostring(tp, format.mintick)
+    label.new(x=bar_index, y=high, text=txt,
+         style=label.style_label_down,
+         color=color.new(color.red, 0),
+         textcolor=color.white)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+// Simple fallbacks (use placeholders). They won't include SL/TP/RSI/Confluence.
+alertcondition(baseSig,   title="Short Setup (BASE)",
+     message="Short {{ticker}} (BASE)\n{{time}}\nPrice: {{close}}")
+alertcondition(strongSig, title="Short Setup (STRONG)",
+     message="Short {{ticker}} (STRONG)\n{{time}}\nPrice: {{close}}")
+
+// Dynamic alert — EXACT format requested.
+// Turn on: inputs → “Also trigger alert() …” and in TV alert set Condition = Any alert() function call
+if useAnyAlert and (baseSig or strongSig)
+    firstLine = "Short " + syminfo.ticker + " " + (strongSig ? "(STRONG)" : "(BASE)")
+    dyn = firstLine + "\n" +
+          dtStr + "\n" +
+          "CFL: " + str.tostring(conf) + "/4\n" +
+          "RSI: " + str.tostring(math.round(rsi,1)) + "\n" +
+          "Price: " + str.tostring(close, format.mintick) + "\n" +
+          "SL: " + str.tostring(sl, format.mintick) + "\n" +
+          "TP: " + str.tostring(tp, format.mintick)
+    alert(dyn, alert.freq_once_per_bar_close)
+
+// Tiny debug flags
+plotchar(useSurge and surgeOk, char="↑", title="Surge OK",    color=color.new(color.orange, 0), location=location.top, size=size.tiny)
+plotchar(useRSI   and rsiObOk, char="R", title="RSI OB roll", color=color.new(color.purple, 0), location=location.top, size=size.tiny)
+plotchar(useBB    and bbOk,    char="B", title="BB Exhaust",  color=color.new(color.blue, 0),   location=location.top, size=size.tiny)
+plotchar(useVol   and volOk,   char="V", title="Vol Spike",   color=color.new(color.green, 0),  location=location.top, size=size.tiny)
