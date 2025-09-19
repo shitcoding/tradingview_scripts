@@ -1,5 +1,5 @@
 //@version=6
-indicator("Hedge Short Setup Outcome Auditor v1.2", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("Hedge Short Setup Outcome Auditor v1.3", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inputs (mirrored from your signal script so conditions match 1:1)
@@ -157,6 +157,10 @@ if sz > 0
             barsTo  = bar_index - eIdx
             tpHitTime = fmtTime(time)
 
+            // Profit calc for short
+            profitAbs = eEntry - tgt
+            profitPct = profitAbs / eEntry * 100
+
             txt = "Short " + syminfo.ticker + " " + (eStrong ? "(STRONG)" : "(BASE)") + "\n" +
                   eDT + "\n" +
                   "CFL: " + str.tostring(eConf) + "/4\n" +
@@ -164,6 +168,8 @@ if sz > 0
                   "Price: " + str.tostring(eEntry, format.mintick) + "\n" +
                   "TP: " + str.tostring(tgt, format.mintick) + "\n" +
                   "RES: TP HIT ✓\n" +
+                  "ROIx1: " + str.tostring(profitAbs, format.mintick) + " / " +
+                  str.tostring(profitPct, "#.##") + "%\n" +
                   str.tostring(barsTo) + " bars / " + tpHitTime
 
             label.new(x=eTime, y=eY, text=txt, style=label.style_label_down,
