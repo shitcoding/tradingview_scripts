@@ -1,5 +1,5 @@
 //@version=6
-indicator("Hedge Short Setup Outcome Auditor v1.1", overlay=true, max_labels_count=500, max_lines_count=500)
+indicator("Hedge Short Setup Outcome Auditor v1.2", overlay=true, max_labels_count=500, max_lines_count=500)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inputs (mirrored from your signal script so conditions match 1:1)
@@ -88,18 +88,22 @@ edgeStrong = edgeUp(strongRaw)
 baseSig   = barReady and (oneShot ? edgeBase   : baseRaw) and not strongRaw
 strongSig = barReady and (oneShot ? edgeStrong : strongRaw)
 
-// TP from ATR at signal bar
+// TP from ATR
 atr = ta.atr(atrLen)
 sl  = close + atrSLx * atr
 tp  = close - atrTPx * atr
 
-// Datetime string (UTC + offset)
+// Date helpers
 pad2(x) =>
     x < 10 ? "0" + str.tostring(x) : str.tostring(x)
-offsetMs = tzOffsetH * 60 * 60 * 1000
-tAdj     = time + offsetMs
-yy2      = (year(tAdj) % 100)
-dtStr    = pad2(dayofmonth(tAdj)) + "." + pad2(month(tAdj)) + "." + pad2(yy2) + " " + pad2(hour(tAdj)) + ":" + pad2(minute(tAdj))
+
+fmtTime(t) =>
+    offsetMs = tzOffsetH * 60 * 60 * 1000
+    tAdj = t + offsetMs
+    yy2  = (year(tAdj) % 100)
+    pad2(dayofmonth(tAdj)) + "." + pad2(month(tAdj)) + "." + pad2(yy2) + " " + pad2(hour(tAdj)) + ":" + pad2(minute(tAdj))
+
+dtStr = fmtTime(time)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Outcome tracking
@@ -132,11 +136,11 @@ if newSig
     array.push(rsiArr, rsi)
     array.push(confArr, conf)
     array.push(dtArr,  dtStr)
-    array.push(timeArr, time)   // store bar time for safe labeling
+    array.push(timeArr, time)
     total       += 1
     totalStrong += strongSig ? 1 : 0
 
-// Scan open signals each bar for TP hits
+// Scan open signals
 sz = array.size(idxArr)
 if sz > 0
     for i = sz - 1 to 0
@@ -151,6 +155,7 @@ if sz > 0
             eDT     = array.get(dtArr, i)
             eTime   = array.get(timeArr, i)
             barsTo  = bar_index - eIdx
+            tpHitTime = fmtTime(time)
 
             txt = "Short " + syminfo.ticker + " " + (eStrong ? "(STRONG)" : "(BASE)") + "\n" +
                   eDT + "\n" +
@@ -158,7 +163,8 @@ if sz > 0
                   "RSI: " + str.tostring(math.round(eRSI, 1)) + "\n" +
                   "Price: " + str.tostring(eEntry, format.mintick) + "\n" +
                   "TP: " + str.tostring(tgt, format.mintick) + "\n" +
-                  "RESULT: TP HIT ✓ in " + str.tostring(barsTo) + " bars"
+                  "RES: TP HIT ✓\n" +
+                  str.tostring(barsTo) + " bars / " + tpHitTime
 
             label.new(x=eTime, y=eY, text=txt, style=label.style_label_down,
                       xloc=xloc.bar_time, color=color.new(color.lime, 0),
@@ -198,7 +204,7 @@ if barstate.islastconfirmedhistory
                       "RSI: " + str.tostring(math.round(eRSI, 1)) + "\n" +
                       "Price: " + str.tostring(eEntry, format.mintick) + "\n" +
                       "TP: " + str.tostring(tgt, format.mintick) + "\n" +
-                      "RESULT: OPEN ⏳ (no TP yet)"
+                      "RES: OPEN ⏳"
             label.new(x=eTime, y=eY, text=txtOpen, style=label.style_label_down,
                       xloc=xloc.bar_time, color=color.new(color.gray, 10),
                       textcolor=color.white, size=size.normal)
