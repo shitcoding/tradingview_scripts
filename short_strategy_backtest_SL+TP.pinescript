@@ -1,0 +1,110 @@
+//@version=6
+strategy("Hedge Short Setup Backtest (with SL+TP)", overlay=true, pyramiding=0,
+     margin_long=100, margin_short=100, initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs (same as your indicator)
+// ─────────────────────────────────────────────────────────────────────────────
+grpSurge   = "1) Surge (Momentum Exhaustion)"
+useSurge   = input.bool(true,  title="Use % Surge condition", group=grpSurge)
+surgeLb    = input.int(72,     title="Lookback bars", minval=1, group=grpSurge)
+surgePct   = input.float(10.0, title="Price ↑ over lookback ≥ (%)", minval=0.1, step=0.1, group=grpSurge)
+
+grpRSI     = "2) RSI Overbought"
+useRSI     = input.bool(true,  title="Use RSI overbought & roll-over", group=grpRSI)
+rsiLen     = input.int(14,     title="RSI Length", minval=2, group=grpRSI)
+rsiOb      = input.int(70,     title="RSI Overbought Level", minval=50, maxval=100, group=grpRSI)
+needRoll   = input.bool(true,  title="Require RSI rolling over (RSI < RSI[1])", group=grpRSI)
+
+grpBB      = "3) Bollinger Exhaustion"
+useBB      = input.bool(true,  title="Use Bollinger exhaustion filter", group=grpBB)
+bbLen      = input.int(20,     title="BB Length", minval=2, group=grpBB)
+bbMult     = input.float(2.0,  title="BB StdDev Mult", minval=0.5, step=0.1, group=grpBB)
+bbMode     = input.string("Touch+Re-entry", "Exhaustion Logic", options=["Above Upper","Touch+Re-entry"], group=grpBB)
+
+grpVol     = "4) Volume Confirmation"
+useVol     = input.bool(false, title="Require volume spike", group=grpVol)
+volLen     = input.int(20,     title="Volume SMA Length", minval=1, group=grpVol)
+volMult    = input.float(1.5,  title="Volume ≥ SMA ×", minval=0.1, step=0.1, group=grpVol)
+
+grpTrend   = "Trend Filter"
+trendMode  = input.string("Off", "Trend Filter", options=["Off","Avoid Strong Uptrend","Only In Uptrend"], group=grpTrend)
+emaLen     = input.int(200,    title="EMA length for trend", minval=2, group=grpTrend)
+
+grpSig     = "Signal Settings"
+minConf    = input.int(2,      title="Min confluence for BASE", minval=1, maxval=4, group=grpSig)
+strongConf = input.int(3,      title="Min confluence for STRONG", minval=2, maxval=4, group=grpSig)
+fireOnClose= input.bool(true,  title="Fire on bar close only", group=grpSig)
+oneShot    = input.bool(true,  title="Avoid repeated signals (cluster)", group=grpSig)
+
+grpATR     = "SL/TP settings"
+atrLen     = input.int(14,     title="ATR Length", minval=1, group=grpATR)
+atrSLx     = input.float(1.5,  title="Stop Loss = ATR ×", minval=0.1, step=0.1, group=grpATR)
+atrTPx     = input.float(1.0,  title="Take Profit = ATR ×", minval=0.1, step=0.1, group=grpATR)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core conditions (same as your signal script)
+// ─────────────────────────────────────────────────────────────────────────────
+ema      = ta.ema(close, emaLen)
+emaSlope = ema - ema[5]
+strongUp = close > ema and emaSlope > 0
+trendOK  = switch trendMode
+    "Off"                  => true
+    "Avoid Strong Uptrend" => not strongUp
+    =>                        strongUp
+
+nzCloseN = nz(close[surgeLb])
+surgeOk  = useSurge and (nzCloseN > 0) and (close / nzCloseN - 1 >= surgePct/100.0)
+
+rsi      = ta.rsi(close, rsiLen)
+rsiValid = not na(rsi) and not na(rsi[1])
+rsiObOk  = useRSI and rsiValid and (rsi > rsiOb) and (not needRoll or rsi < rsi[1])
+
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+upper = basis + dev
+bbAboveRaw   = close > upper
+bbReenterRaw = ta.crossunder(close, upper)
+bbOk         = useBB and (bbMode == "Above Upper" ? bbAboveRaw : bbReenterRaw)
+
+volSma = ta.sma(volume, volLen)
+volOk  = useVol and (volume > volSma * volMult)
+
+// Confluence
+conf = (surgeOk ? 1 : 0) + (rsiObOk ? 1 : 0) + (bbOk ? 1 : 0) + (volOk ? 1 : 0)
+baseRaw   = trendOK and (conf >= minConf)
+strongRaw = trendOK and (conf >= strongConf)
+
+// Edge detection
+edgeUp(cond) => ta.crossover(cond ? 1 : 0, 0.5)
+
+barReady   = fireOnClose ? barstate.isconfirmed : true
+edgeBase   = edgeUp(baseRaw)
+edgeStrong = edgeUp(strongRaw)
+
+baseSig   = barReady and (oneShot ? edgeBase   : baseRaw) and not strongRaw
+strongSig = barReady and (oneShot ? edgeStrong : strongRaw)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trade execution
+// ─────────────────────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+sl  = close + atrSLx * atr
+tp  = close - atrTPx * atr
+
+if strongSig or baseSig
+    // Build the label text incrementally to avoid line-continuation errors
+    labelText = "Short " + syminfo.ticker + " " + (strongSig ? "(STRONG)" : "(BASE)") + "\n"
+    labelText += "CFL: " + str.tostring(conf) + "/4\n"
+    labelText += "RSI: " + str.tostring(math.round(rsi, 1)) + "\n"
+    labelText += "Entry: " + str.tostring(close, format.mintick) + "\n"
+    labelText += "TP: " + str.tostring(tp, format.mintick) + "\n"
+    labelText += "SL: " + str.tostring(sl, format.mintick)
+
+    label.new(bar_index, high, text=labelText,
+              color=color.red, textcolor=color.white,
+              style=label.style_label_down)
+
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit", from_entry="Short", stop=sl, limit=tp)
