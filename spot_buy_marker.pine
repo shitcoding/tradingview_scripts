@@ -1,0 +1,119 @@
+//@version=6
+indicator("Spot Buy Marker + PnL", overlay=true, max_labels_count=100, max_lines_count=100)
+
+// ════════════════════════════════════════════════════════════════════════════
+// INPUT PARAMETERS
+// ════════════════════════════════════════════════════════════════════════════
+buyPrice = input.float(0.0, "Buy Price", step=0.00000001, group="Entry")
+buyTime = input.time(timestamp("2025-10-12 12:00"), "Buy Time", group="Entry")
+
+inputMode = input.string("Quantity", "Input Mode", options=["Quantity", "Total Investment"], group="Entry")
+qtyInput = input.float(1.0, "Quantity (coins)", step=0.00000001, group="Entry")
+totalInput = input.float(100.0, "Total Investment (USD)", step=0.01, group="Entry")
+
+showLabel = input.bool(true, "Show Entry Label", group="Display")
+showLine = input.bool(true, "Show Horizontal Line", group="Display")
+showTable = input.bool(true, "Show PnL Table", group="Display")
+
+lineColor = input.color(color.new(color.teal, 0), "Line Color", group="Style")
+lineWidth = input.int(1, "Line Width", minval=1, maxval=10, group="Style")
+lineStyle = input.string("Dashed", "Line Style", options=["Solid", "Dashed", "Dotted"], group="Style")
+labelColor = input.color(color.new(color.green, 0), "Label Color", group="Style")
+
+// ════════════════════════════════════════════════════════════════════════════
+// CALCULATE QUANTITY AND TOTAL
+// ════════════════════════════════════════════════════════════════════════════
+qty = inputMode == "Quantity" ? qtyInput : (buyPrice > 0 ? totalInput / buyPrice : 0)
+totalInvested = inputMode == "Quantity" ? (buyPrice * qtyInput) : totalInput
+
+// ════════════════════════════════════════════════════════════════════════════
+// FIND ENTRY BAR
+// ════════════════════════════════════════════════════════════════════════════
+var int entryBar = na
+
+// Find first bar with time >= buyTime
+if na(entryBar) and time >= buyTime
+    entryBar := bar_index
+
+// If user changed entry time, reset
+if bar_index == 0
+    entryBar := na
+
+// ════════════════════════════════════════════════════════════════════════════
+// PNL CALCULATION
+// ════════════════════════════════════════════════════════════════════════════
+isValid = buyPrice > 0 and qty > 0 and not na(entryBar)
+
+pnlPercent = isValid ? ((close - buyPrice) / buyPrice) * 100 : 0
+pnlAmount = isValid ? (close - buyPrice) * qty : 0
+costBasis = isValid ? buyPrice * qty : 0
+
+// ════════════════════════════════════════════════════════════════════════════
+// HORIZONTAL LINE
+// ════════════════════════════════════════════════════════════════════════════
+var line priceLine = na
+
+if isValid and showLine
+    // Convert string to line style
+    lineStyleType = lineStyle == "Solid" ? line.style_solid : lineStyle == "Dotted" ? line.style_dotted : line.style_dashed
+    
+    if na(priceLine)
+        priceLine := line.new(entryBar, buyPrice, bar_index, buyPrice, color=lineColor, style=lineStyleType, width=lineWidth, extend=extend.right)
+    else
+        line.set_xy1(priceLine, entryBar, buyPrice)
+        line.set_xy2(priceLine, bar_index, buyPrice)
+        line.set_color(priceLine, lineColor)
+        line.set_style(priceLine, lineStyleType)
+        line.set_width(priceLine, lineWidth)
+
+// ════════════════════════════════════════════════════════════════════════════
+// ENTRY POINT LABEL
+// ════════════════════════════════════════════════════════════════════════════
+var label entryLabel = na
+
+if isValid and showLabel
+    labelText = "Entry: " + str.tostring(buyPrice, "#.##########") + "\nCurrent: " + str.tostring(close, "#.##########") + "\nQty: " + str.tostring(qty, "#.##") + "\nTotal: " + str.tostring(totalInvested, "#.##") + "\nPnL: " + str.tostring(pnlAmount, "#.##") + " (" + str.tostring(pnlPercent, "#.##") + "%)"
+    
+    // Dynamic label color based on PnL
+    dynamicLabelColor = pnlAmount > 0 ? color.new(color.green, 0) : pnlAmount < 0 ? color.new(color.red, 0) : color.new(color.gray, 0)
+    
+    if na(entryLabel)
+        entryLabel := label.new(entryBar, buyPrice, labelText, style=label.style_label_up, color=dynamicLabelColor, textcolor=color.white, size=size.normal)
+    else
+        label.set_xy(entryLabel, entryBar, buyPrice)
+        label.set_text(entryLabel, labelText)
+        label.set_color(entryLabel, dynamicLabelColor)
+
+// ════════════════════════════════════════════════════════════════════════════
+// PNL TABLE (TOP RIGHT CORNER)
+// ════════════════════════════════════════════════════════════════════════════
+var table pnlTable = na
+
+if isValid and showTable
+    if na(pnlTable)
+        pnlTable := table.new(position.top_right, 2, 6, border_width=1, border_color=color.gray)
+    
+    // Headers
+    table.cell(pnlTable, 0, 0, "Parameter", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(pnlTable, 1, 0, "Value", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    
+    // Data
+    table.cell(pnlTable, 0, 1, "Entry Price", text_size=size.small, text_color=color.white)
+    table.cell(pnlTable, 1, 1, str.tostring(buyPrice, "#.####"), text_size=size.small, text_color=color.white)
+    
+    table.cell(pnlTable, 0, 2, "Current Price", text_size=size.small, text_color=color.white)
+    table.cell(pnlTable, 1, 2, str.tostring(close, "#.####"), text_size=size.small, text_color=color.white)
+    
+    table.cell(pnlTable, 0, 3, "Quantity", text_size=size.small, text_color=color.white)
+    table.cell(pnlTable, 1, 3, str.tostring(qty, "#.####"), text_size=size.small, text_color=color.white)
+    
+    table.cell(pnlTable, 0, 4, "Cost Basis", text_size=size.small, text_color=color.white)
+    table.cell(pnlTable, 1, 4, str.tostring(costBasis, "#.####"), text_size=size.small, text_color=color.white)
+    
+    table.cell(pnlTable, 0, 5, "PnL", text_size=size.small, text_color=color.white)
+    
+    pnlColor = pnlAmount > 0 ? color.new(color.green, 70) : pnlAmount < 0 ? color.new(color.red, 70) : color.new(color.gray, 80)
+    
+    pnlText = str.tostring(pnlAmount, "#.####") + "\n(" + str.tostring(pnlPercent, "#.##") + "%)"
+    
+    table.cell(pnlTable, 1, 5, pnlText, bgcolor=pnlColor, text_size=size.small, text_color=color.white)
